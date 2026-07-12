@@ -49,6 +49,8 @@ done
 cleanup() { [ -z "$TMP_DIR" ] || rm -rf "$TMP_DIR"; }
 trap cleanup EXIT HUP INT TERM
 
+has_tty() { (: </dev/tty) 2>/dev/null; }
+
 download() {
   url=$1; output=$2
   if command -v curl >/dev/null 2>&1; then
@@ -116,13 +118,20 @@ if [ "$SKILL_ONLY" -eq 0 ]; then
 fi
 
 if [ "$INSTALL_SKILL" -eq 1 ]; then
-  if command -v npx >/dev/null 2>&1; then
-    say "Teaching your coding agents how to use kanban"
-    npx --yes skills add "$REPO" --skill kanban -g -y
-    ok "Installed the kanban agent skill via skills.sh"
-  else
+  if ! command -v npx >/dev/null 2>&1; then
     warn "Node.js/npx was not found, so the agent skill was not installed"
     printf "%s\n" "  Later, run: npx skills add $REPO --skill kanban -g"
+  elif ! has_tty; then
+    warn "No interactive terminal is available, so skill installation was skipped"
+    printf "%s\n" "  Later, run: npx skills add $REPO --skill kanban -g"
+  else
+    say "Choose which coding agents should learn kanban"
+    if npx --yes skills add "$REPO" --skill kanban -g </dev/tty; then
+      ok "Agent skill installation finished via skills.sh"
+    else
+      warn "skills.sh could not install the skill to every selected agent"
+      printf "%s\n" "  Retry with: npx skills add $REPO --skill kanban -g"
+    fi
   fi
 fi
 
