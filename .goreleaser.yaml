@@ -1,0 +1,46 @@
+version: 2
+
+project_name: kanban
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: kanban
+    main: .
+    binary: kanban
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+
+archives:
+  - id: binaries
+    ids:
+      - kanban
+    formats:
+      - tar.gz
+    name_template: "kanban_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  prerelease: auto
