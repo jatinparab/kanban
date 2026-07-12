@@ -1,7 +1,7 @@
 # kanban
 
 [![CI](https://github.com/jatinparab/kanban/actions/workflows/ci.yml/badge.svg)](https://github.com/jatinparab/kanban/actions/workflows/ci.yml)
-[![skills.sh](https://skills.sh/b/jatinparab/kanban)](https://skills.sh/jatinparab/kanban)
+[![Agent Skill](https://img.shields.io/badge/agent_skill-install-7c3aed)](https://skills.sh/jatinparab/kanban)
 
 **Durable plans for coding agents.** A tiny, local-first CLI that turns long-running work into independently verifiable Markdown tickets—without putting board state in your repository.
 
