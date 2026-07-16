@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`kanban` is a lightweight, local-first CLI for agents to manage Markdown tickets in a per-worktree board. The canonical board data is outside the repository; a worktree only receives an optional `.kanban` symlink.
+`kanban` is a lightweight, local-first CLI for agents to manage Markdown tickets in a per-project board. The canonical board data is outside the repository; a worktree only receives an optional `.kanban` symlink.
 
 The five valid ticket statuses are exactly:
 
@@ -51,7 +51,7 @@ Canonical data in `<kanban-home>` is the sole source of truth. `.kanban` is only
 
 The CLI resolves the current location before every board-aware command:
 
-1. If the current directory is inside a Git worktree, obtain its Git top-level directory and resolve it to a physical, absolute path.
+1. If the current directory is inside a Git worktree, obtain its Git common directory, resolve it to a physical, absolute path, and use its parent project directory. The current worktree root is retained only as the location for that worktree's optional attachment.
 2. Otherwise, resolve the current directory to a physical, absolute path.
 
 The board ID is the lowercase hexadecimal SHA-256 of the UTF-8 string:
@@ -60,12 +60,12 @@ The board ID is the lowercase hexadecimal SHA-256 of the UTF-8 string:
 kanban/v1:<kind>:<resolved-path>
 ```
 
-`kind` is `git-worktree` in case 1 and `directory` in case 2. The full 64-character hash is the board directory name.
+`kind` is `git-project` in case 1 and `directory` in case 2. The full 64-character hash is the board directory name.
 
 Consequences:
 
-- Every Git worktree has a distinct board, even for the same repository or branch.
-- Commands from any subdirectory of a Git worktree locate that worktree's board.
+- All worktrees for a Git project share one board, including worktrees created for individual ticket branches.
+- Commands from any subdirectory of a Git worktree locate that project's board.
 - A non-Git board is identified by the exact directory from which it was initialized; its child directories are separate identities.
 
 ## Board metadata
@@ -77,7 +77,7 @@ Consequences:
   "format_version": 1,
   "id": "<board-id>",
   "name": "Descriptive board name",
-  "identity_kind": "git-worktree",
+  "identity_kind": "git-project",
   "identity_path": "/physical/absolute/path",
   "created_at": "2026-07-12T12:34:56Z",
   "next_task_id": 1,
@@ -107,19 +107,19 @@ Rules:
 
 - IDs are positive, sequential decimal integers allocated from `next_task_id` and are never reused by the CLI.
 - Titles are required, trimmed, and single-line.
-- The body is optional and may be empty.
-- The CLI owns the frontmatter fields. Users may edit ticket Markdown directly, but malformed frontmatter, duplicate IDs, filename/ID disagreement, or unknown statuses are data errors.
+- The body is optional and may be empty. The CLI never accepts a body value; use a file-editing tool to add or change it directly in the canonical Markdown file.
+- The CLI owns the frontmatter fields. Users may edit the Markdown body directly, but malformed frontmatter, duplicate IDs, filename/ID disagreement, or unknown statuses are data errors.
 - Ticket lists are ordered by numeric ID ascending.
 
 ## Worktree attachment
 
-For a Git worktree, the attachment path is `<worktree-root>/.kanban`. For a non-Git board, it is `<identity-path>/.kanban`.
+For a Git project, the attachment path is `<current-worktree-root>/.kanban`; each worktree may attach the shared board independently. For a non-Git board, it is `<identity-path>/.kanban`.
 
 ### `attach`
 
 `kanban attach` requires an active board for the current identity. It creates `.kanban` as a symlink to the active canonical board directory and records its physical path in `board.json`.
 
-When in a Git worktree, it also adds `.kanban` to that worktree's `.git/info/exclude` if it is not already present. It never edits a tracked `.gitignore`.
+When in a Git worktree, it also adds `.kanban` to that worktree's Git exclude configuration if it is not already present. It never edits a tracked `.gitignore`.
 
 It fails safely if `.kanban` exists as a real file/directory or as a symlink to another destination. Repeating attach for the same correct symlink succeeds without changing data.
 
@@ -155,9 +155,13 @@ No board here. Run `kanban init "BOARD NAME"` to start a board.
 
 This is a successful result (exit code 0), not an error.
 
-### `kanban task create "TITLE" [--body "MARKDOWN"]`
+### `kanban task create "TITLE"`
 
-Creates a new ticket in `TODO`. The optional `--body` value is the Markdown body; absent means an empty body. It prints the created ticket ID and title.
+Creates a new ticket in `TODO` with an empty Markdown body. It prints the created ticket ID and title. Add scope, verification criteria, and other body content directly to the canonical ticket file with a file-editing tool.
+
+### `kanban task --id ID edit --title "TITLE"`
+
+Edits one existing ticket title. Exactly one `--id` and one nonempty, single-line `--title` are required. The body is preserved and must be changed directly in the canonical Markdown file with a file-editing tool. A successful edit updates `updated_at`, writes the ticket atomically, and returns the updated ticket.
 
 ### `kanban task --id ID [--id ID ...] status STATUS`
 
@@ -217,7 +221,7 @@ Normal success returns 0. Invalid usage returns 2. Operational, validation, and 
 
 ## Safety and multi-agent behavior
 
-All mutations (`init`, `attach`, `detach`, task create/status, and archive) use a board-home local advisory write lock. They re-read relevant state while holding the lock.
+All mutations (`init`, `attach`, `detach`, task create/edit/status, and archive) use a board-home local advisory write lock. They re-read relevant state while holding the lock.
 
 Files are written using a temporary file in the destination directory, flushed, then atomically renamed. Multi-ticket status updates are validated before any ticket replacement; a failure leaves all ticket contents unchanged. Archive uses an atomic rename when source and archive are on the same filesystem (as this layout ensures).
 
@@ -227,6 +231,6 @@ Read commands do not mutate data. Symlink operations must resolve and validate d
 
 - No remote synchronization, collaboration server, database, or background process.
 - No board rename.
-- No CLI ticket-title/body editing; edit the canonical Markdown ticket file directly.
+- No editor-launching interface or CLI body editing; use a file-editing tool on the canonical Markdown ticket file.
 - No labels, assignees, priorities, dependencies, search, filtering, or status-transition restrictions.
 - No automatic migration or recovery of manually corrupted board data.

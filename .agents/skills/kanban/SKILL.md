@@ -9,10 +9,11 @@ compatibility: Requires the kanban CLI on PATH.
 Use this only for longer-horizon work whose tasks are individually verifiable. Do **not** turn intermediate actions within one task into tickets; use normal notes or an in-context checklist instead.
 
 1. Run `kanban status`. If no board exists, run `kanban init "DESCRIPTIVE BOARD NAME"`.
-2. Create outcome-oriented tickets with verification criteria in the body:
+2. Create outcome-oriented tickets, then use your file-editing tool to add scope and verification criteria to the ticket body. Preserve the YAML frontmatter when editing `.kanban/tasks/NNNN.md`.
    ```sh
-   kanban task create "OUTCOME" --body "Scope and how to verify completion."
+   kanban task create "OUTCOME"
    ```
+   The CLI does not accept ticket bodies; do not use `--body`.
 3. Keep state current:
    ```sh
    kanban task --id ID status IN_PROGRESS

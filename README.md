@@ -6,7 +6,7 @@
 **Durable plans for coding agents.** A tiny, local-first CLI that turns long-running work into independently verifiable Markdown tickets—without putting board state in your repository.
 
 - Canonical boards live outside the repo; `.kanban` is only a symlink.
-- Boards are isolated by Git worktree.
+- Boards are scoped to a Git project and shared by all of its worktrees.
 - Tickets are readable Markdown with YAML frontmatter.
 - Every command supports structured `--json` output.
 - No server, account, database, or network connection required.
@@ -45,7 +45,9 @@ go install github.com/jatinparab/kanban@latest
 
 ```sh
 kanban init "Release work"
-kanban task create "Investigate failure" --body "Capture logs and identify the cause."
+kanban task create "Investigate failure"
+kanban task --id 1 edit --title "Investigate release failure"
+# Add scope and verification notes directly in .kanban/tasks/0001.md with your file-editing tool.
 kanban task --id 1 status IN_PROGRESS
 kanban status
 kanban task --id 1 show

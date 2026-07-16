@@ -39,9 +39,10 @@ func usage(format string, args ...any) error {
 }
 
 type identity struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"`
-	Path string `json:"path"`
+	ID             string `json:"id"`
+	Kind           string `json:"kind"`
+	Path           string `json:"path"`
+	AttachmentRoot string `json:"-"`
 }
 
 type board struct {
@@ -182,23 +183,56 @@ func resolveIdentity() (identity, error) {
 	if err != nil {
 		return identity{}, fail("IDENTITY_ERROR", "get current directory: %v", err)
 	}
-	kind, path := "directory", cwd
-	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	cmd.Dir = cwd
-	if b, e := cmd.Output(); e == nil {
-		kind, path = "git-worktree", strings.TrimSpace(string(b))
-	}
-	path, err = filepath.Abs(path)
+	path, err := physicalPath(cwd)
 	if err != nil {
-		return identity{}, fail("IDENTITY_ERROR", "%v", err)
+		return identity{}, err
+	}
+	id := identity{Kind: "directory", Path: path, AttachmentRoot: path}
+
+	rootCmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	rootCmd.Dir = cwd
+	if b, e := rootCmd.Output(); e == nil {
+		worktreeRoot, e := physicalPath(strings.TrimSpace(string(b)))
+		if e != nil {
+			return identity{}, e
+		}
+		commonCmd := exec.Command("git", "rev-parse", "--git-common-dir")
+		commonCmd.Dir = worktreeRoot
+		common, e := commonCmd.Output()
+		if e != nil {
+			return identity{}, fail("IDENTITY_ERROR", "resolve Git project: %v", e)
+		}
+		commonPath := strings.TrimSpace(string(common))
+		if !filepath.IsAbs(commonPath) {
+			commonPath = filepath.Join(worktreeRoot, commonPath)
+		}
+		commonPath, e = physicalPath(commonPath)
+		if e != nil {
+			return identity{}, e
+		}
+		// Git worktrees share a common .git directory. Its parent is the project
+		// directory, so it remains stable when a ticket is worked on in another
+		// worktree while attachments stay local to each worktree.
+		id = identity{Kind: "git-project", Path: filepath.Dir(commonPath), AttachmentRoot: worktreeRoot}
+	}
+	sum := sha256.Sum256([]byte("kanban/v1:" + id.Kind + ":" + id.Path))
+	id.ID = hex.EncodeToString(sum[:])
+	return id, nil
+}
+
+func physicalPath(path string) (string, error) {
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return "", fail("IDENTITY_ERROR", "%v", err)
 	}
 	path, err = filepath.EvalSymlinks(path)
 	if err != nil {
-		return identity{}, fail("IDENTITY_ERROR", "resolve path: %v", err)
+		return "", fail("IDENTITY_ERROR", "resolve path: %v", err)
 	}
-	sum := sha256.Sum256([]byte("kanban/v1:" + kind + ":" + path))
-	return identity{ID: hex.EncodeToString(sum[:]), Kind: kind, Path: path}, nil
+	return path, nil
 }
+
+func attachmentPath(id identity) string { return filepath.Join(id.AttachmentRoot, ".kanban") }
 
 func (a *application) boardDir(id string) string  { return filepath.Join(a.home, "boards", id) }
 func (a *application) boardFile(id string) string { return filepath.Join(a.boardDir(id), "board.json") }
@@ -270,7 +304,7 @@ func writeBoard(path string, b board) error {
 }
 
 func attachmentState(id identity, dir string) (string, bool) {
-	p := filepath.Join(id.Path, ".kanban")
+	p := attachmentPath(id)
 	target, err := os.Readlink(p)
 	if err != nil {
 		return p, false
@@ -303,15 +337,15 @@ func createAttachment(id identity, dir string) error {
 	_, attached := attachmentState(id, dir)
 	created := false
 	if !attached {
-		if err := os.Symlink(dir, filepath.Join(id.Path, ".kanban")); err != nil {
+		if err := os.Symlink(dir, attachmentPath(id)); err != nil {
 			return fail("OPERATION_FAILED", "create attachment: %v", err)
 		}
 		created = true
 	}
-	if id.Kind == "git-worktree" {
-		if err := addGitExclude(id.Path); err != nil {
+	if id.Kind == "git-project" {
+		if err := addGitExclude(id.AttachmentRoot); err != nil {
 			if created {
-				_ = os.Remove(filepath.Join(id.Path, ".kanban"))
+				_ = os.Remove(attachmentPath(id))
 			}
 			return fail("OPERATION_FAILED", "update Git exclude: %v", err)
 		}
@@ -383,7 +417,7 @@ func (a *application) init(args []string) (any, string, error) {
 			}
 		}()
 		now := time.Now().UTC().Format(time.RFC3339)
-		b = board{FormatVersion: 1, ID: id.ID, Name: name, IdentityKind: id.Kind, IdentityPath: id.Path, CreatedAt: now, NextTaskID: 1, AttachmentPath: filepath.Join(id.Path, ".kanban")}
+		b = board{FormatVersion: 1, ID: id.ID, Name: name, IdentityKind: id.Kind, IdentityPath: id.Path, CreatedAt: now, NextTaskID: 1, AttachmentPath: attachmentPath(id)}
 		if e := writeBoard(a.boardFile(id.ID), b); e != nil {
 			return fail("OPERATION_FAILED", "write board: %v", e)
 		}
@@ -454,7 +488,7 @@ func (a *application) attach() (any, string, error) {
 		if e = createAttachment(id, a.boardDir(id.ID)); e != nil {
 			return e
 		}
-		b.AttachmentPath = filepath.Join(id.Path, ".kanban")
+		b.AttachmentPath = attachmentPath(id)
 		if e = writeBoard(a.boardFile(id.ID), b); e != nil {
 			return fail("OPERATION_FAILED", "write board: %v", e)
 		}
@@ -492,7 +526,7 @@ func (a *application) detach() (any, string, error) {
 		if e != nil {
 			return e
 		}
-		if b.AttachmentPath == filepath.Join(id.Path, ".kanban") {
+		if b.AttachmentPath == attachmentPath(id) {
 			b.AttachmentPath = ""
 			if e = writeBoard(a.boardFile(id.ID), b); e != nil {
 				return fail("OPERATION_FAILED", "write board: %v", e)
@@ -645,23 +679,21 @@ func readAllTickets(dir string) ([]ticket, error) {
 
 func parseTaskArgs(args []string) ([]int, []string, error) {
 	ids := []int{}
-	rest := []string{}
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--id" {
-			if i+1 >= len(args) {
-				return nil, nil, usage("--id requires a positive integer")
-			}
-			n, e := strconv.Atoi(args[i+1])
-			if e != nil || n < 1 {
-				return nil, nil, usage("invalid task id %q", args[i+1])
-			}
-			ids = append(ids, n)
-			i++
-		} else {
-			rest = append(rest, args[i])
+	for i := 0; i < len(args); {
+		if args[i] != "--id" {
+			return ids, args[i:], nil
 		}
+		if i+1 >= len(args) {
+			return nil, nil, usage("--id requires a positive integer")
+		}
+		n, e := strconv.Atoi(args[i+1])
+		if e != nil || n < 1 {
+			return nil, nil, usage("invalid task id %q", args[i+1])
+		}
+		ids = append(ids, n)
+		i += 2
 	}
-	return ids, rest, nil
+	return ids, nil, nil
 }
 
 func uniqueSorted(ids []int) []int {
@@ -685,10 +717,16 @@ func (a *application) task(args []string) (any, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	ids = uniqueSorted(ids)
 	if len(ids) == 0 || len(rest) == 0 {
-		return nil, "", usage("usage: kanban task --id ID [--id ID ...] (show | status STATUS)")
+		return nil, "", usage("usage: kanban task --id ID [--id ID ...] (show | status STATUS | edit --title TITLE)")
 	}
+	if rest[0] == "edit" {
+		if len(ids) != 1 {
+			return nil, "", usage("edit requires exactly one --id")
+		}
+		return a.taskEdit(ids[0], rest[1:])
+	}
+	ids = uniqueSorted(ids)
 	switch rest[0] {
 	case "show":
 		if len(rest) != 1 {
@@ -706,25 +744,10 @@ func (a *application) task(args []string) (any, string, error) {
 }
 
 func (a *application) taskCreate(args []string) (any, string, error) {
-	body := ""
-	positionals := make([]string, 0, 1)
-	for i := 0; i < len(args); i++ {
-		if args[i] == "--body" {
-			if i+1 >= len(args) {
-				return nil, "", usage("--body requires a value")
-			}
-			body = args[i+1]
-			i++
-		} else if strings.HasPrefix(args[i], "--") {
-			return nil, "", usage("unknown option %q", args[i])
-		} else {
-			positionals = append(positionals, args[i])
-		}
+	if len(args) != 1 {
+		return nil, "", usage("usage: kanban task create \"TITLE\"")
 	}
-	if len(positionals) != 1 {
-		return nil, "", usage("usage: kanban task create \"TITLE\" [--body \"MARKDOWN\"]")
-	}
-	title := strings.TrimSpace(positionals[0])
+	title := strings.TrimSpace(args[0])
 	if title == "" || strings.ContainsAny(title, "\r\n") {
 		return nil, "", usage("task title must be a nonempty single line")
 	}
@@ -745,7 +768,7 @@ func (a *application) taskCreate(args []string) (any, string, error) {
 			return e
 		}
 		now := time.Now().UTC().Format(time.RFC3339)
-		t = ticket{ID: b.NextTaskID, Title: title, Status: "TODO", CreatedAt: now, UpdatedAt: now, Body: body}
+		t = ticket{ID: b.NextTaskID, Title: title, Status: "TODO", CreatedAt: now, UpdatedAt: now}
 		data, _ := encodeTicket(t)
 		if e = writeAtomic(taskFile(dir, t.ID), data, 0600); e != nil {
 			return fail("OPERATION_FAILED", "write task: %v", e)
@@ -761,6 +784,46 @@ func (a *application) taskCreate(args []string) (any, string, error) {
 		return nil, "", err
 	}
 	return map[string]any{"task": t}, fmt.Sprintf("Created task %d: %s", t.ID, t.Title), nil
+}
+
+func (a *application) taskEdit(id int, args []string) (any, string, error) {
+	if len(args) != 2 || args[0] != "--title" {
+		return nil, "", usage("usage: kanban task --id ID edit --title \"TITLE\"")
+	}
+	title := strings.TrimSpace(args[1])
+	if title == "" || strings.ContainsAny(title, "\r\n") {
+		return nil, "", usage("task title must be a nonempty single line")
+	}
+
+	idn, err := resolveIdentity()
+	if err != nil {
+		return nil, "", err
+	}
+	var updated ticket
+	err = a.withLock(func() error {
+		if _, e := readBoard(a.boardFile(idn.ID)); e != nil {
+			return e
+		}
+		var e error
+		updated, e = readTicket(a.boardDir(idn.ID), id)
+		if e != nil {
+			return e
+		}
+		updated.Title = title
+		updated.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
+		data, e := encodeTicket(updated)
+		if e != nil {
+			return fail("OPERATION_FAILED", "encode task %d: %v", id, e)
+		}
+		if e = writeAtomic(taskFile(a.boardDir(idn.ID), id), data, 0600); e != nil {
+			return fail("OPERATION_FAILED", "update task %d: %v", id, e)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return map[string]any{"task": updated}, fmt.Sprintf("Updated task %d: %s", updated.ID, updated.Title), nil
 }
 
 func (a *application) taskShow(ids []int) (any, string, error) {
@@ -937,7 +1000,8 @@ Usage:
   kanban status [--json]
   kanban attach [--json]
   kanban detach [--json]
-  kanban task create "TITLE" [--body "MARKDOWN"] [--json]
+  kanban task create "TITLE" [--json]
+  kanban task --id ID edit --title "TITLE" [--json]
   kanban task --id ID [--id ID ...] show [--json]
   kanban task --id ID [--id ID ...] status STATUS [--json]
   kanban archive [--yes] [--json]
@@ -947,12 +1011,13 @@ Statuses: TODO, BLOCKED, IN_PROGRESS, IN_REVIEW, DONE
 
 Boards are canonical under KANBAN_HOME (or the platform data directory).
 The .kanban path is only a symlink to that source of truth.
+Git worktrees in the same project share one board.
 All commands support --json and errors use nonzero exit codes.
 Run kanban help COMMAND for focused documentation.
 `
 	if topic == "" {
 		return all
 	}
-	m := map[string]string{"init": "kanban init \"BOARD NAME\"\n  Create and automatically attach a board for the current Git worktree or directory.\n  The required name is immutable. Archive an existing board before initializing another.\n", "status": "kanban status\n  Show board metadata, attachment state, status counts, and every active ticket.\n  No board is a successful result with initialization guidance.\n", "attach": "kanban attach\n  Safely create .kanban as a symlink to the canonical active board.\n", "detach": "kanban detach\n  Remove only a .kanban symlink matching the current board. Safe and idempotent.\n", "task": "kanban task create \"TITLE\" [--body \"MARKDOWN\"]\nkanban task --id ID [--id ID ...] show\nkanban task --id ID [--id ID ...] status STATUS\n  IDs are sequential. Status changes validate every ID before writing.\n  Status input is case-insensitive. Valid: TODO, BLOCKED, IN_PROGRESS, IN_REVIEW, DONE.\n", "archive": "kanban archive [--yes]\n  Detach and move the active board to timestamped canonical archive storage.\n  Confirmation is required unless --yes is supplied.\n", "help": "kanban help [COMMAND]\n  Show complete or focused agent-oriented command documentation.\n"}
+	m := map[string]string{"init": "kanban init \"BOARD NAME\"\n  Create and automatically attach a board for the current Git project or directory.\n  The required name is immutable. Archive an existing board before initializing another.\n", "status": "kanban status\n  Show board metadata, attachment state, status counts, and every active ticket.\n  No board is a successful result with initialization guidance.\n", "attach": "kanban attach\n  Safely create .kanban as a symlink to the canonical active board.\n", "detach": "kanban detach\n  Remove only a .kanban symlink matching the current board. Safe and idempotent.\n", "task": "kanban task create \"TITLE\"\nkanban task --id ID edit --title \"TITLE\"\nkanban task --id ID [--id ID ...] show\nkanban task --id ID [--id ID ...] status STATUS\n  The CLI never accepts ticket bodies; use a file-editing tool on the canonical Markdown file instead.\n  IDs are sequential. Status changes validate every ID before writing.\n  Status input is case-insensitive. Valid: TODO, BLOCKED, IN_PROGRESS, IN_REVIEW, DONE.\n", "archive": "kanban archive [--yes]\n  Detach and move the active board to timestamped canonical archive storage.\n  Confirmation is required unless --yes is supplied.\n", "help": "kanban help [COMMAND]\n  Show complete or focused agent-oriented command documentation.\n"}
 	return m[topic]
 }
